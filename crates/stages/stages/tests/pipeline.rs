@@ -4,6 +4,7 @@ use alloy_consensus::{constants::ETH_TO_WEI, Header, TxEip1559, TxReceipt};
 use alloy_eips::eip1559::INITIAL_BASE_FEE;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{bytes, Address, Bytes, TxKind, B256, U256};
+use futures_util::{FutureExt, StreamExt};
 use reth_chainspec::{ChainSpecBuilder, ChainSpecProvider, MAINNET};
 use reth_config::config::StageConfig;
 use reth_consensus::noop::NoopConsensus;
@@ -34,10 +35,10 @@ use reth_provider::{
 };
 use reth_prune_types::PruneModes;
 use reth_revm::database::StateProviderDatabase;
-use reth_stages::{sets::DefaultStages, stages::StorageHashingStage};
+use reth_stages::sets::DefaultStages;
 use reth_stages_api::{
-    ExecInput, ExecOutput, Pipeline, Stage, StageError, StageId, StageSet, UnwindInput,
-    UnwindOutput,
+    ExecInput, ExecOutput, Pipeline, PipelineEvent, Stage, StageError, StageId, StageSet,
+    UnwindInput, UnwindOutput,
 };
 use reth_static_file::StaticFileProducer;
 use reth_storage_api::{
@@ -175,7 +176,7 @@ fn build_pipeline<H, B>(
     max_block: u64,
     tip: B256,
     stages_config: StageConfig,
-    interrupt_unwind: bool,
+    interrupt_unwind: Option<StageId>,
 ) -> Pipeline<reth_provider::test_utils::MockNodeTypesWithDB>
 where
     H: HeaderDownloader<Header = Header> + 'static,
@@ -200,18 +201,18 @@ where
         None,
     )
     .builder();
-    let stages = if interrupt_unwind {
-        stages.set(InterruptStorageHashing(StorageHashingStage::default()))
-    } else {
-        stages
-    };
-
-    let pipeline = Pipeline::builder()
+    let mut builder = Pipeline::builder()
         .with_tip_sender(tip_tx)
         .with_max_block(max_block)
-        .with_fail_on_unwind(true)
-        .add_stages(stages)
-        .build(provider_factory, static_file_producer);
+        .with_fail_on_unwind(true);
+    for stage in stages.build() {
+        builder = if interrupt_unwind == Some(stage.id()) {
+            builder.add_stage(InterruptUnwind(stage))
+        } else {
+            builder.add_stage(stage)
+        };
+    }
+    let pipeline = builder.build(provider_factory, static_file_producer);
     pipeline.set_tip(tip);
     pipeline
 }
@@ -231,7 +232,7 @@ async fn run_pipeline_forward_and_unwind(
     storage_settings: Option<StorageSettings>,
     num_blocks: u64,
     unwind_target: u64,
-    interrupt_unwind: bool,
+    interrupt_unwind: Option<StageId>,
 ) -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -425,7 +426,8 @@ async fn run_pipeline_forward_and_unwind(
     let tip = file_client.tip().expect("tip");
 
     let mut stages_config = StageConfig::default();
-    if interrupt_unwind {
+    stages_config.execution.max_blocks = Some(1);
+    if interrupt_unwind.is_some() {
         // Exercise full Merkle rebuilds with the five-block interruption fixture.
         stages_config.merkle.rebuild_threshold = 1;
     }
@@ -493,24 +495,25 @@ async fn run_pipeline_forward_and_unwind(
     // source
     assert_changesets_queryable(&pipeline_provider_factory, 1..=num_blocks)?;
 
-    // Interrupt after the real storage hashing unwind commit, while Execution is still ahead.
-    if interrupt_unwind {
+    // Interrupt after a durable stage commit, before the rest of the unwind completes.
+    if interrupt_unwind.is_some() {
         assert_eq!(
             pipeline.unwind(unwind_target, None).unwrap_err().to_string(),
-            "interrupted after storage hashing commit"
+            "interrupted after unwind commit"
         );
         let provider = pipeline_provider_factory.provider()?;
         assert_eq!(
             provider.get_stage_checkpoint(StageId::StorageHashing)?.unwrap().block_number,
             unwind_target
         );
+        let interrupted_execution = interrupt_unwind == Some(StageId::Execution);
         assert_eq!(
             provider.get_stage_checkpoint(StageId::Execution)?.unwrap().block_number,
-            num_blocks
+            if interrupted_execution { num_blocks - 1 } else { num_blocks }
         );
         assert_eq!(
             provider.latest().storage(CONTRACT_ADDRESS, B256::ZERO)?,
-            Some(U256::from(unwind_target))
+            Some(U256::from(if interrupted_execution { num_blocks - 1 } else { unwind_target }))
         );
         drop(provider);
         drop(pipeline);
@@ -535,13 +538,22 @@ async fn run_pipeline_forward_and_unwind(
             max_block,
             tip,
             stages_config.clone(),
-            false,
+            None,
         );
         pipeline.resume_unwind()?;
         assert_eq!(pipeline_provider_factory.provider()?.pipeline_unwind()?, None);
         pipeline_provider_factory.clone().assert_consistent()?;
     } else {
+        let mut events = pipeline.events();
         pipeline.unwind(unwind_target, None)?;
+        let mut execution_tip = num_blocks;
+        while let Some(Some(event)) = events.next().now_or_never() {
+            if let PipelineEvent::Unwound { stage_id: StageId::Execution, result } = event {
+                assert_eq!(result.checkpoint.block_number, execution_tip - 1);
+                execution_tip = result.checkpoint.block_number;
+            }
+        }
+        assert_eq!(execution_tip, unwind_target);
     }
 
     // Verify unwind
@@ -610,7 +622,7 @@ async fn run_pipeline_forward_and_unwind(
         max_block,
         tip,
         stages_config,
-        false,
+        None,
     );
 
     let (_resync_pipeline, resync_result) = resync_pipeline.run_as_fut(None).await;
@@ -652,7 +664,7 @@ async fn run_pipeline_forward_and_unwind(
         );
     }
 
-    if interrupt_unwind {
+    if interrupt_unwind.is_some() {
         drop(pipeline);
         drop(_resync_pipeline);
         drop(resync_runtime);
@@ -680,7 +692,7 @@ async fn run_pipeline_forward_and_unwind(
 /// This exercises both account and storage hashing/history stages.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pipeline() -> eyre::Result<()> {
-    run_pipeline_forward_and_unwind(None, 5, 2, false).await
+    run_pipeline_forward_and_unwind(None, 5, 2, None).await
 }
 
 /// Same as [`test_pipeline`] but runs with v2 storage settings (`use_hashed_state=true`,
@@ -693,23 +705,37 @@ async fn test_pipeline() -> eyre::Result<()> {
 /// - Unwind must still revert hashed state via the hashing stages before `MerkleUnwind` validates
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pipeline_v2() -> eyre::Result<()> {
-    run_pipeline_forward_and_unwind(Some(StorageSettings::v2()), 5, 2, false).await
+    run_pipeline_forward_and_unwind(Some(StorageSettings::v2()), 5, 2, None).await
 }
 
 /// A fresh pipeline must finish the durable unwind before trusting Execution's checkpoint.
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_storage_v2_unwind_recovers() -> eyre::Result<()> {
-    run_pipeline_forward_and_unwind(Some(StorageSettings::v2()), 5, 2, true).await
+    run_pipeline_forward_and_unwind(
+        Some(StorageSettings::v2()),
+        5,
+        2,
+        Some(StageId::StorageHashing),
+    )
+    .await
 }
 
-struct InterruptStorageHashing(StorageHashingStage);
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_execution_batch_recovers() -> eyre::Result<()> {
+    run_pipeline_forward_and_unwind(None, 5, 2, Some(StageId::Execution)).await
+}
 
-impl<Provider> Stage<Provider> for InterruptStorageHashing
-where
-    StorageHashingStage: Stage<Provider>,
-{
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_execution_batch_v2_recovers() -> eyre::Result<()> {
+    run_pipeline_forward_and_unwind(Some(StorageSettings::v2()), 5, 2, Some(StageId::Execution))
+        .await
+}
+
+struct InterruptUnwind<S>(S);
+
+impl<Provider, S: Stage<Provider>> Stage<Provider> for InterruptUnwind<S> {
     fn id(&self) -> StageId {
-        StageId::StorageHashing
+        self.0.id()
     }
 
     fn execute(&mut self, provider: &Provider, input: ExecInput) -> Result<ExecOutput, StageError> {
@@ -725,7 +751,7 @@ where
     }
 
     fn post_unwind_commit(&mut self) -> Result<(), StageError> {
-        Err(std::io::Error::other("interrupted after storage hashing commit").into())
+        Err(std::io::Error::other("interrupted after unwind commit").into())
     }
 }
 

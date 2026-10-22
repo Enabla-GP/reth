@@ -563,8 +563,12 @@ where
         provider: &Provider,
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
-        let (range, unwind_to, _) =
-            input.unwind_block_range_with_threshold(self.thresholds.max_blocks.unwrap_or(u64::MAX));
+        // Unwind materializes changesets in memory without checking the forward execution
+        // gas/change thresholds. Cap every batch, including during startup recovery.
+        const MAX_UNWIND_BLOCKS: u64 = 10_000;
+        let max_blocks =
+            self.thresholds.max_blocks.unwrap_or(MAX_UNWIND_BLOCKS).min(MAX_UNWIND_BLOCKS);
+        let (range, unwind_to, _) = input.unwind_block_range_with_threshold(max_blocks);
         if range.is_empty() {
             return Ok(UnwindOutput {
                 checkpoint: input.checkpoint.with_block_number(input.unwind_to),
@@ -578,7 +582,8 @@ where
         // Unwind account and storage changesets, as well as receipts.
         //
         // This also updates `PlainStorageState` and `PlainAccountState`.
-        let bundle_state_with_receipts = provider.take_state_above(unwind_to)?;
+        let bundle_state_with_receipts =
+            provider.take_state_above(unwind_to, input.checkpoint.block_number)?;
 
         // Prepare the input for post unwind commit hook, where an `ExExNotification` will be sent.
         if self.exex_manager_handle.has_exexs() {

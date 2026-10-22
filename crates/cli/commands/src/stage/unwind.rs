@@ -14,12 +14,10 @@ use reth_consensus::noop::NoopConsensus;
 use reth_db::DatabaseEnv;
 use reth_downloaders::{bodies::noop::NoopBodiesDownloader, headers::noop::NoopHeaderDownloader};
 use reth_evm::ConfigureEvm;
-use reth_exex::ExExManagerHandle;
 use reth_provider::{providers::ProviderNodeTypes, BlockNumReader, ProviderFactory};
 use reth_stages::{
     sets::{DefaultStages, OfflineStages},
-    stages::ExecutionStage,
-    ExecutionStageThresholds, Pipeline, StageSet,
+    Pipeline, StageSet,
 };
 use reth_static_file::StaticFileProducer;
 use std::sync::Arc;
@@ -103,31 +101,17 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> Command<C>
                 .disable(reth_stages::StageId::SenderRecovery),
             )
         } else {
-            Pipeline::<N>::builder().with_tip_sender(tip_tx).add_stages(
-                DefaultStages::new(
-                    provider_factory.clone(),
-                    tip_rx,
-                    Arc::new(NoopConsensus::default()),
-                    NoopHeaderDownloader::default(),
-                    NoopBodiesDownloader::default(),
-                    evm_config.clone(),
-                    stage_conf.clone(),
-                    prune_modes.clone(),
-                    None,
-                )
-                .set(ExecutionStage::new(
-                    evm_config,
-                    Arc::new(NoopConsensus::default()),
-                    ExecutionStageThresholds {
-                        max_blocks: None,
-                        max_changes: None,
-                        max_cumulative_gas: None,
-                        max_duration: None,
-                    },
-                    stage_conf.execution_external_clean_threshold(),
-                    ExExManagerHandle::empty(),
-                )),
-            )
+            Pipeline::<N>::builder().with_tip_sender(tip_tx).add_stages(DefaultStages::new(
+                provider_factory.clone(),
+                tip_rx,
+                Arc::new(NoopConsensus::default()),
+                NoopHeaderDownloader::default(),
+                NoopBodiesDownloader::default(),
+                evm_config,
+                stage_conf.clone(),
+                prune_modes.clone(),
+                None,
+            ))
         };
 
         let pipeline = builder.build(

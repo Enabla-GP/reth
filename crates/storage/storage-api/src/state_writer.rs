@@ -120,10 +120,12 @@ pub trait StateWriter {
     fn remove_state_above(&self, block: BlockNumber) -> ProviderResult<()>;
 
     /// Take the block range of state, recreating the [`ExecutionOutcome`]. The state of the passed
-    /// block is not removed.
+    /// block is not removed. `end` is the current execution tip (inclusive), which may be below
+    /// the header tip after a partial execution or unwind batch.
     fn take_state_above(
         &self,
         block: BlockNumber,
+        end: BlockNumber,
     ) -> ProviderResult<ExecutionOutcome<Self::Receipt>>;
 }
 

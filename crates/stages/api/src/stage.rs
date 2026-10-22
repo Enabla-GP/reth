@@ -185,16 +185,10 @@ impl UnwindInput {
         &self,
         threshold: u64,
     ) -> (RangeInclusive<BlockNumber>, BlockNumber, bool) {
-        // +1 is to skip the block we're unwinding to
-        let mut start = self.unwind_to + 1;
-        let end = self.checkpoint;
-
-        start = max(start, end.block_number.saturating_sub(threshold));
-
-        let unwind_to = start - 1;
-
-        let is_final_range = unwind_to == self.unwind_to;
-        (start..=end.block_number, unwind_to, is_final_range)
+        let end = self.checkpoint.block_number;
+        // Even a zero threshold must make progress. The retained block is outside the batch.
+        let unwind_to = max(self.unwind_to, end.saturating_sub(threshold.max(1)));
+        (unwind_to + 1..=end, unwind_to, unwind_to == self.unwind_to)
     }
 }
 
@@ -481,6 +475,24 @@ mod tests {
             assert_eq!(range_output.tx_range, 3..4);
             assert_eq!(range_output.block_range, 3..=3);
             assert!(range_output.is_final_range);
+        }
+    }
+
+    #[test]
+    fn unwind_batches_respect_block_limit() {
+        let input = crate::UnwindInput {
+            checkpoint: StageCheckpoint::new(10),
+            unwind_to: 2,
+            bad_block: None,
+        };
+        for (limit, range, target, done) in [
+            (0, 10..=10, 9, false),
+            (1, 10..=10, 9, false),
+            (3, 8..=10, 7, false),
+            (8, 3..=10, 2, true),
+            (u64::MAX, 3..=10, 2, true),
+        ] {
+            assert_eq!(input.unwind_block_range_with_threshold(limit), (range, target, done));
         }
     }
 }
