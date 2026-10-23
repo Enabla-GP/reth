@@ -369,7 +369,7 @@ mod tests {
     use alloy_primitives::{address, Address, B256, U256};
     use reth_db_api::{
         cursor::{DbCursorRO, DbDupCursorRW},
-        models::{BlockNumberAddress, ClientVersion},
+        models::BlockNumberAddress,
         table::TableImporter,
         transaction::{DbTx, DbTxMut},
     };
@@ -378,12 +378,8 @@ mod tests {
 
     fn create_test_db() -> DatabaseEnv {
         let path = TempDir::new().unwrap();
-        let mut db = DatabaseEnv::open(
-            path.path(),
-            DatabaseEnvKind::RW,
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .unwrap();
+        let mut db =
+            DatabaseEnv::open(path.path(), DatabaseEnvKind::RW, DatabaseArguments::test()).unwrap();
         db.create_tables().unwrap();
         db
     }

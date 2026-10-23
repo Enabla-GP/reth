@@ -1058,7 +1058,7 @@ mod tests {
         let factory = ProviderFactory::<MockNodeTypesWithDB<DatabaseEnv>>::new_with_database_path(
             _db_tempdir.path(),
             Arc::new(chain_spec),
-            DatabaseArguments::new(Default::default()),
+            DatabaseArguments::test(),
             StaticFileProvider::read_write(static_dir_path).unwrap(),
             RocksDBProvider::builder(&rocksdb_path).build().unwrap(),
             reth_tasks::Runtime::test(),

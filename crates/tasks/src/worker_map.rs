@@ -291,7 +291,17 @@ mod tests {
         release_tx.send(()).unwrap();
         assert_eq!(first.unwrap().await.unwrap(), 1);
 
-        let third = map.try_spawn_on("busy-worker", || 3).expect("worker should be idle");
-        assert_eq!(third.await.unwrap(), 3);
+        // Receiving the result can precede the worker's pending-count cleanup.
+        let third = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(third) = map.try_spawn_on("busy-worker", || 3) {
+                    break third.await.expect("worker should return the accepted task result");
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker should become idle after completing the task");
+        assert_eq!(third, 3);
     }
 }
