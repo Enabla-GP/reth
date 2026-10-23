@@ -148,9 +148,8 @@ impl DatabaseArguments {
 
     /// Create database arguments suitable for testing.
     ///
-    /// Uses a small geometry (64MB max, 4MB growth) to avoid exhausting the system's
-    /// virtual memory map limit (`vm.max_map_count`) when many test databases are open
-    /// concurrently.
+    /// Uses a small geometry (64 MiB max, 4 MiB growth) to avoid exhausting the process's
+    /// virtual address space when many test databases are open concurrently.
     pub fn test() -> Self {
         Self {
             geometry: Geometry {
@@ -230,6 +229,12 @@ impl DatabaseArguments {
     /// Set `max_readers` flag.
     pub const fn with_max_readers(mut self, max_readers: Option<u64>) -> Self {
         self.max_readers = max_readers;
+        self
+    }
+
+    /// Sets the client version without changing the database geometry.
+    pub fn with_client_version(mut self, client_version: ClientVersion) -> Self {
+        self.client_version = client_version;
         self
     }
 
@@ -707,8 +712,7 @@ mod tests {
     /// Create database for testing with specified path
     fn create_test_db_with_path(kind: DatabaseEnvKind, path: &Path) -> DatabaseEnv {
         let mut env =
-            DatabaseEnv::open(path, kind, DatabaseArguments::new(ClientVersion::default()))
-                .expect(ERROR_DB_CREATION);
+            DatabaseEnv::open(path, kind, DatabaseArguments::test()).expect(ERROR_DB_CREATION);
         env.create_tables().expect(ERROR_TABLE_CREATION);
         env
     }
@@ -1437,12 +1441,8 @@ mod tests {
             assert_eq!(result.expect(ERROR_RETURN_VALUE), 200);
         }
 
-        let env = DatabaseEnv::open(
-            path,
-            DatabaseEnvKind::RO,
-            DatabaseArguments::new(ClientVersion::default()),
-        )
-        .expect(ERROR_DB_CREATION);
+        let env = DatabaseEnv::open(path, DatabaseEnvKind::RO, DatabaseArguments::test())
+            .expect(ERROR_DB_CREATION);
 
         // GET
         let result =

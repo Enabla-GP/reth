@@ -1184,9 +1184,17 @@ mod tests {
         let proof_handle = ProofWorkerHandle::new(&runtime, ctx, false, proof_result_tx);
 
         // Verify handle can be cloned
-        let _cloned_handle = proof_handle.clone();
+        let cloned_handle = proof_handle.clone();
 
-        // Workers shut down automatically when handle is dropped
+        // Close both pools; account workers retain storage-work senders.
         drop(proof_handle);
+        drop(cloned_handle);
+
+        // Same-name FIFO barriers finish the broadcasts and their database captures.
+        runtime.spawn_blocking_named("account-workers", || {}).get();
+        runtime.spawn_blocking_named("storage-workers", || {}).get();
+
+        // Join named workers before the test process enters static destruction.
+        drop(runtime);
     }
 }
